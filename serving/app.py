@@ -91,7 +91,7 @@ def _load_programs() -> None:
                 f"Program directory not found for '{label}' at {label_dir}."
             )
         try:
-            _programs[label] = dspy.load(label_dir)
+            _programs[label] = dspy.load(label_dir, allow_pickle=True)
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to load program for '{label}' from {label_dir}: {exc}"
@@ -151,7 +151,8 @@ def classify(request: ClassifyRequest):
             lm_kwargs = {"temperature": LM_TEMPERATURE, "max_tokens": LM_MAX_TOKENS}
             if LM_BASE_URL:
                 lm_kwargs["api_base"] = LM_BASE_URL
-            if LM_REASONING_EFFORT:
+            name = gen_model.split("/")[-1] if "/" in gen_model else gen_model
+            if LM_REASONING_EFFORT and name.startswith("o"):
                 lm_kwargs["reasoning_effort"] = LM_REASONING_EFFORT
             lm = dspy.LM(gen_model, **lm_kwargs)
             with dspy.context(lm=lm):

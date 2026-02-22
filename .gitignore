@@ -5,6 +5,10 @@
 # Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
 
 # Virtual environments
 venv/
@@ -14,9 +18,16 @@ clean_venv/
 .idea/
 .vscode/
 *.swp
+.DS_Store
 
 # Results
 training/results/
 
 # Ruff
 .ruff_cache/
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/

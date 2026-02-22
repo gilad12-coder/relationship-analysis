@@ -25,6 +25,8 @@ def romantic_metric(
     gold: dspy.Example,
     pred: dspy.Prediction,
     trace=None,
+    pred_name=None,
+    pred_trace=None,
 ) -> dspy.Prediction:
     """GEPA metric for the romantic label.
 
@@ -76,6 +78,8 @@ def family_metric(
     gold: dspy.Example,
     pred: dspy.Prediction,
     trace=None,
+    pred_name=None,
+    pred_trace=None,
 ) -> dspy.Prediction:
     """GEPA metric for the family label.
 
@@ -126,6 +130,8 @@ def friendship_metric(
     gold: dspy.Example,
     pred: dspy.Prediction,
     trace=None,
+    pred_name=None,
+    pred_trace=None,
 ) -> dspy.Prediction:
     """GEPA metric for the friendship label.
 
@@ -177,6 +183,8 @@ def professional_metric(
     gold: dspy.Example,
     pred: dspy.Prediction,
     trace=None,
+    pred_name=None,
+    pred_trace=None,
 ) -> dspy.Prediction:
     """GEPA metric for the professional label.
 
@@ -229,6 +237,8 @@ def unknown_metric(
     gold: dspy.Example,
     pred: dspy.Prediction,
     trace=None,
+    pred_name=None,
+    pred_trace=None,
 ) -> dspy.Prediction:
     """GEPA metric for the unknown label.
 
@@ -281,6 +291,8 @@ def irrelevant_metric(
     gold: dspy.Example,
     pred: dspy.Prediction,
     trace=None,
+    pred_name=None,
+    pred_trace=None,
 ) -> dspy.Prediction:
     """GEPA metric for the irrelevant label.
 

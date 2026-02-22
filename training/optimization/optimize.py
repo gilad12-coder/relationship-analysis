@@ -53,11 +53,26 @@ class OptimizationResult:
     val_accuracy: float
 
 
-def _lm_kwargs() -> dict:
-    """Returns shared keyword arguments for all dspy.LM() calls.
+def _supports_reasoning_effort(model_name: str) -> bool:
+    """Checks whether a model supports the reasoning_effort parameter.
 
     Args:
-        None.
+        model_name: DSPy-compatible model identifier (e.g. 'openai/o4-mini').
+
+    Returns:
+        True if the model is known to support reasoning_effort.
+    """
+    # Strip provider prefix (e.g. 'openai/o4-mini' -> 'o4-mini').
+    name = model_name.split("/")[-1] if "/" in model_name else model_name
+    return name.startswith("o")
+
+
+def _lm_kwargs(model_name: str = "") -> dict:
+    """Returns shared keyword arguments for a dspy.LM() call.
+
+    Args:
+        model_name: The model identifier, used to decide whether to include
+                    reasoning_effort.
 
     Returns:
         Dict of LM configuration values derived from training config.
@@ -65,7 +80,7 @@ def _lm_kwargs() -> dict:
     kwargs = {"temperature": LM_TEMPERATURE, "max_tokens": LM_MAX_TOKENS}
     if LM_BASE_URL:
         kwargs["api_base"] = LM_BASE_URL
-    if LM_REASONING_EFFORT:
+    if LM_REASONING_EFFORT and _supports_reasoning_effort(model_name):
         kwargs["reasoning_effort"] = LM_REASONING_EFFORT
     return kwargs
 
@@ -82,7 +97,7 @@ def _temporary_lm(model_name: str):
     Returns:
         Context manager yielding with the requested LM set as active.
     """
-    lm = dspy.LM(model_name, **_lm_kwargs())
+    lm = dspy.LM(model_name, **_lm_kwargs(model_name))
     with dspy.context(lm=lm):
         yield
 
@@ -198,7 +213,7 @@ def run(
     )
     program = _make_program(label)
     metric = LABEL_REGISTRY[label]["metric"]
-    reflection_lm = dspy.LM(reflection_model, **_lm_kwargs())
+    reflection_lm = dspy.LM(reflection_model, **_lm_kwargs(reflection_model))
     with _temporary_lm(gen_model):
         optimizer = dspy.GEPA(
             metric=metric,

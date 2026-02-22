@@ -142,6 +142,7 @@ curl -X POST http://localhost:8000/classify \
     "irrelevant": false
   }
 }
+```
 
 ## Pipeline Overview
 
