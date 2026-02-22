@@ -32,6 +32,7 @@ Key access also works for loops: ``splits["romantic"]``.
 """
 
 import math
+import os
 from dataclasses import dataclass
 
 import pandas as pd
@@ -48,6 +49,8 @@ from training.config import (
     MAX_TEST_SIZE,
     MIN_TEST_SIZE,
     RANDOM_STATE,
+    RESULTS_DIR,
+    SPLITS_SUBDIR,
     TEXT_COLUMN,
     Z_SCORES,
 )
@@ -486,3 +489,37 @@ def run(df: pd.DataFrame) -> Splits:
             ),
         )
     return Splits(by_label=per_label)
+
+
+def save(splits: Splits) -> None:
+    """Saves all splits to CSV for auditability.
+
+    Writes one CSV per label to RESULTS_DIR/SPLITS_SUBDIR/{label}.csv.
+    Each row has the text, label value, and a 'split' column indicating
+    which partition the example belongs to.
+
+    Args:
+        splits: Output of run().
+
+    Returns:
+        None.
+    """
+    splits_dir = os.path.join(RESULTS_DIR, SPLITS_SUBDIR)
+    os.makedirs(splits_dir, exist_ok=True)
+    for label in LABELS:
+        label_split = splits[label]
+        parts = [
+            (label_split.test, "test"),
+            (label_split.dspy.train, "dspy_train"),
+            (label_split.dspy.val, "dspy_val"),
+            (label_split.transformer.trainval, "transformer_trainval"),
+        ]
+        frames = []
+        for df, split_name in parts:
+            chunk = df.copy()
+            chunk["split"] = split_name
+            frames.append(chunk)
+        combined = pd.concat(frames, ignore_index=True)
+        path = os.path.join(splits_dir, f"{label}.csv")
+        combined.to_csv(path, index=False)
+        logger.info(f"Label '{label}' splits saved to {path}.")

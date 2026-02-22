@@ -26,6 +26,7 @@ import json
 import os
 import sys
 
+import dspy
 import pandas as pd
 from loguru import logger
 
@@ -168,6 +169,9 @@ def _run_fixed_dspy_pair(
 ) -> dict:
     """Runs GEPA for all labels with a single fixed model pair, skipping grid search.
 
+    Supports resuming: labels with a saved program on disk are loaded
+    instead of re-optimized.
+
     Args:
         datasets:         Output of dataset_builder.build().
         gen_model:        DSPy generation model string.
@@ -180,6 +184,18 @@ def _run_fixed_dspy_pair(
     logger.info(f"Fixed pair: gen={gen_model} | reflection={reflection_model}.")
     best_per_label = {}
     for label in LABELS:
+        program_dir = os.path.join(RESULTS_DIR, PROGRAMS_SUBDIR, label)
+        if os.path.isdir(program_dir):
+            logger.info(f"[{label}] Saved program found. Loading instead of re-optimizing.")
+            best_per_label[label] = optimize.OptimizationResult(
+                label=label,
+                gen_model=gen_model,
+                reflection_model=reflection_model,
+                optimized_program=dspy.load(program_dir, allow_pickle=True),
+                val_f1=0.0,
+                val_accuracy=0.0,
+            )
+            continue
         best_per_label[label] = optimize.run(
             label=label,
             gen_model=gen_model,
@@ -191,27 +207,39 @@ def _run_fixed_dspy_pair(
     return best_per_label
 
 
-def _save_programs(best_per_label: dict) -> None:
-    """Saves each label's optimized program to disk for serving.
-
-    Creates ``RESULTS_DIR/PROGRAMS_SUBDIR/{label}/`` with the serialized
-    program and writes a manifest mapping each label to its gen_model.
+def _label_eval_exists(label: str) -> bool:
+    """Checks if a label already has a row in the final evaluation CSV.
 
     Args:
-        best_per_label: Dict keyed by label name, each an OptimizationResult.
+        label: Label name.
+
+    Returns:
+        True if the eval CSV exists and contains a row for this label.
+    """
+    eval_path = os.path.join(RESULTS_DIR, FINAL_EVAL_CSV)
+    if not os.path.isfile(eval_path):
+        return False
+    eval_df = pd.read_csv(eval_path)
+    return label in eval_df["label"].values
+
+
+def _save_program(label: str, result, manifest: dict) -> None:
+    """Saves a single label's optimized program to disk and updates the manifest.
+
+    Args:
+        label:    Label name.
+        result:   OptimizationResult for this label.
+        manifest: Shared manifest dict (mutated in place, then written to disk).
 
     Returns:
         None.
     """
     programs_dir = os.path.join(RESULTS_DIR, PROGRAMS_SUBDIR)
-    manifest = {}
-    for label in LABELS:
-        result = best_per_label[label]
-        label_dir = os.path.join(programs_dir, label)
-        os.makedirs(label_dir, exist_ok=True)
-        result.optimized_program.save(label_dir, save_program=True)
-        manifest[label] = result.gen_model
-        logger.info(f"[{label}] Program saved to {label_dir}.")
+    label_dir = os.path.join(programs_dir, label)
+    os.makedirs(label_dir, exist_ok=True)
+    result.optimized_program.save(label_dir, save_program=True)
+    manifest[label] = result.gen_model
+    logger.info(f"[{label}] Program saved to {label_dir}.")
     manifest_path = os.path.join(programs_dir, PROGRAMS_MANIFEST)
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
@@ -267,10 +295,26 @@ def _run_dspy(args: argparse.Namespace, splits: dict) -> None:
             f"{len(LABELS)} labels = {n_pairs * len(LABELS)} trials."
         )
         best_per_label = grid_search.run(datasets=datasets, auto=args.auto)
+    # Save programs immediately after optimization (enables resume if eval crashes).
+    manifest_path = os.path.join(RESULTS_DIR, PROGRAMS_SUBDIR, PROGRAMS_MANIFEST)
+    manifest = {}
+    if os.path.isfile(manifest_path):
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+    for label in LABELS:
+        _save_program(label, best_per_label[label], manifest)
+
+    # Evaluate on locked test sets (skip labels already evaluated).
     logger.info("Step 5: Final evaluation on locked test sets.")
-    evaluate.run_dspy(best_per_label=best_per_label, datasets=datasets)
-    logger.info("Step 6: Saving optimized programs to disk.")
-    _save_programs(best_per_label)
+    for label in LABELS:
+        if _label_eval_exists(label):
+            logger.info(f"[{label}] Evaluation already exists. Skipping.")
+            continue
+        evaluate.run_dspy_label(
+            label=label,
+            result=best_per_label[label],
+            datasets=datasets,
+        )
 
 
 def main() -> None:
@@ -289,6 +333,7 @@ def main() -> None:
     df = load_dataset()
     logger.info("Step 2: Splitting dataset.")
     splits = split_pipeline.run(df)
+    split_pipeline.save(splits)
     _run_dspy(args, splits)
     logger.info(
         f"Pipeline complete. Results in '{RESULTS_DIR}/': "

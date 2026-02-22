@@ -12,7 +12,6 @@ locally for this run, and restores the prior LM configuration afterward so
 sequential calls do not interfere with each other.
 """
 
-import contextlib
 from dataclasses import dataclass
 
 import dspy
@@ -22,6 +21,7 @@ from sklearn.metrics import f1_score
 from training.config import (
     GEPA_AUTO,
     GEPA_TRACK_STATS,
+    LM_API_KEY,
     LM_BASE_URL,
     LM_MAX_TOKENS,
     LM_REASONING_EFFORT,
@@ -77,29 +77,28 @@ def _lm_kwargs(model_name: str = "") -> dict:
     Returns:
         Dict of LM configuration values derived from training config.
     """
-    kwargs = {"temperature": LM_TEMPERATURE, "max_tokens": LM_MAX_TOKENS}
+    kwargs = {
+        "api_key": LM_API_KEY,
+        "temperature": LM_TEMPERATURE,
+        "max_tokens": LM_MAX_TOKENS,
+    }
     if LM_BASE_URL:
-        kwargs["api_base"] = LM_BASE_URL
+        kwargs["base_url"] = LM_BASE_URL
     if LM_REASONING_EFFORT and _supports_reasoning_effort(model_name):
         kwargs["reasoning_effort"] = LM_REASONING_EFFORT
     return kwargs
 
 
-@contextlib.contextmanager
-def _temporary_lm(model_name: str):
-    """Context manager that sets DSPy's active LM for the duration of the block.
-
-    Restores the previously active LM when the block exits, even on error.
+def _make_lm(model_name: str) -> dspy.LM:
+    """Creates a dspy.LM instance with shared config kwargs.
 
     Args:
         model_name: A DSPy-compatible model identifier string.
 
     Returns:
-        Context manager yielding with the requested LM set as active.
+        A configured dspy.LM instance.
     """
-    lm = dspy.LM(model_name, **_lm_kwargs(model_name))
-    with dspy.context(lm=lm):
-        yield
+    return dspy.LM(model_name, **_lm_kwargs(model_name))
 
 
 def _make_program(label: str) -> dspy.Module:
@@ -213,20 +212,21 @@ def run(
     )
     program = _make_program(label)
     metric = LABEL_REGISTRY[label]["metric"]
-    reflection_lm = dspy.LM(reflection_model, **_lm_kwargs(reflection_model))
-    with _temporary_lm(gen_model):
-        optimizer = dspy.GEPA(
-            metric=metric,
-            auto=effective_auto,
-            track_stats=GEPA_TRACK_STATS,
-            reflection_lm=reflection_lm,
-        )
-        optimized_program = optimizer.compile(
-            student=program,
-            trainset=trainset,
-            valset=valset,
-        )
-        val_f1, val_accuracy = _score_on_valset(optimized_program, valset, label)
+    gen_lm = _make_lm(gen_model)
+    reflection_lm = _make_lm(reflection_model)
+    dspy.configure(lm=gen_lm)
+    optimizer = dspy.GEPA(
+        metric=metric,
+        auto=effective_auto,
+        track_stats=GEPA_TRACK_STATS,
+        reflection_lm=reflection_lm,
+    )
+    optimized_program = optimizer.compile(
+        student=program,
+        trainset=trainset,
+        valset=valset,
+    )
+    val_f1, val_accuracy = _score_on_valset(optimized_program, valset, label)
     logger.info(
         f"GEPA run complete | label='{label}' | gen='{gen_model}' | "
         f"reflection='{reflection_model}' | val_f1={val_f1:.4f} | val_acc={val_accuracy:.4f}"

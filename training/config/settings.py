@@ -40,7 +40,11 @@ DSPY_VAL_SIZE = 0.10
 # ── 4. DSPy / GEPA ─────────────────────────────────────────────────────────
 # Optional custom base URL for the LM provider (e.g. a proxy or local endpoint).
 # Read from LM_BASE_URL env var; empty or unset means use the provider's default.
-LM_BASE_URL = os.environ.get("LM_BASE_URL") or None
+LM_BASE_URL = os.environ.get("LM_BASE_URL", None)
+
+# Optional API key for the LM provider.
+# Read from LM_API_KEY env var; empty or unset means use the provider's default.
+LM_API_KEY = os.environ.get("LM_API_KEY", None)
 
 # LM sampling parameters.
 # Recommended values for gpt-oss-120b: temperature=1.0, max_tokens=16000.
@@ -76,6 +80,7 @@ FINAL_EVAL_CSV = "final_evaluation.csv"
 PREDICTIONS_SUBDIR = "predictions"
 PROGRAMS_SUBDIR = "programs"
 PROGRAMS_MANIFEST = "manifest.json"
+SPLITS_SUBDIR = "splits"
 
 # ── 6. Logging ──────────────────────────────────────────────────────────────
 # Options: "TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"

@@ -27,6 +27,7 @@ model selection. The test set remains strictly clean for final evaluation.
 import itertools
 import os
 
+import dspy
 import pandas as pd
 from loguru import logger
 
@@ -35,18 +36,49 @@ from training.config import (
     GENERATION_MODELS,
     GRID_SEARCH_CSV,
     LABELS,
+    PROGRAMS_SUBDIR,
     REFLECTION_MODELS,
     RESULTS_DIR,
 )
 from training.optimization import optimize
 
 
+def _load_existing_csv() -> pd.DataFrame | None:
+    """Loads the existing grid search CSV if it exists.
+
+    Returns:
+        DataFrame of previous results, or None if no CSV exists.
+    """
+    path = os.path.join(RESULTS_DIR, GRID_SEARCH_CSV)
+    if os.path.isfile(path):
+        return pd.read_csv(path)
+    return None
+
+
+def _label_has_all_trials(existing_df: pd.DataFrame | None, label: str) -> bool:
+    """Checks if all expected grid search trials exist for a label.
+
+    Args:
+        existing_df: Existing grid search results DataFrame, or None.
+        label:       Label name.
+
+    Returns:
+        True if all (gen_model, reflection_model) pairs have results for this label.
+    """
+    if existing_df is None:
+        return False
+    label_rows = existing_df[existing_df["label"] == label]
+    expected = set(itertools.product(GENERATION_MODELS, REFLECTION_MODELS))
+    actual = set(zip(label_rows["gen_model"], label_rows["reflection_model"]))
+    return expected <= actual
+
+
 def run(datasets: dict, auto: str = None) -> dict:
     """Runs the full grid search over all model pairs and all labels.
 
-    Iterates every (gen_model, reflection_model) pair for every label, runs a
-    GEPA optimization trial, records the val F1, and selects the best pair per
-    label. Saves a summary CSV of all results to RESULTS_DIR.
+    Supports resuming: labels whose trials already exist in the grid search
+    CSV are skipped. Programs are loaded from disk when available; otherwise
+    only the best pair is re-run.
 
     Args:
         datasets: Output of dataset_builder.build(), keyed by label name.
@@ -55,7 +87,7 @@ def run(datasets: dict, auto: str = None) -> dict:
 
     Returns:
         A dict keyed by label name, each containing the best OptimizationResult
-        (highest val_f1) across all 9 model pair trials for that label.
+        (highest val_f1) across all model pair trials for that label.
     """
     if not LABELS:
         raise ValueError(
@@ -73,11 +105,26 @@ def run(datasets: dict, auto: str = None) -> dict:
     effective_auto = auto if auto is not None else GEPA_AUTO
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
+    existing_df = _load_existing_csv()
     all_results: list[optimize.OptimizationResult] = []
     model_pairs = list(itertools.product(GENERATION_MODELS, REFLECTION_MODELS))
     total_trials = len(LABELS) * len(model_pairs)
     trial_num = 0
     for label in LABELS:
+        if _label_has_all_trials(existing_df, label):
+            logger.info(f"[{label}] All grid search trials found in CSV. Skipping.")
+            label_rows = existing_df[existing_df["label"] == label]
+            for _, row in label_rows.iterrows():
+                all_results.append(optimize.OptimizationResult(
+                    label=row["label"],
+                    gen_model=row["gen_model"],
+                    reflection_model=row["reflection_model"],
+                    optimized_program=None,
+                    val_f1=row["val_f1"],
+                    val_accuracy=row["val_accuracy"],
+                ))
+            trial_num += len(model_pairs)
+            continue
         trainset = datasets[label]["trainset"]
         valset = datasets[label]["valset"]
         for gen_model, reflection_model in model_pairs:
@@ -96,10 +143,33 @@ def run(datasets: dict, auto: str = None) -> dict:
                 auto=effective_auto,
             )
             all_results.append(result)
-    _save_summary(all_results)
+        _save_summary(all_results)
     best_per_label = _select_best(all_results)
-    _log_best(best_per_label)
 
+    # Restore programs for labels that were skipped.
+    for label, result in best_per_label.items():
+        if result.optimized_program is not None:
+            continue
+        program_dir = os.path.join(RESULTS_DIR, PROGRAMS_SUBDIR, label)
+        if os.path.isdir(program_dir):
+            logger.info(f"[{label}] Loading saved program from {program_dir}.")
+            result.optimized_program = dspy.load(program_dir, allow_pickle=True)
+        else:
+            logger.info(
+                f"[{label}] No saved program found. Re-running best pair: "
+                f"gen={result.gen_model} | reflection={result.reflection_model}."
+            )
+            rerun = optimize.run(
+                label=label,
+                gen_model=result.gen_model,
+                reflection_model=result.reflection_model,
+                trainset=datasets[label]["trainset"],
+                valset=datasets[label]["valset"],
+                auto=effective_auto,
+            )
+            best_per_label[label] = rerun
+
+    _log_best(best_per_label)
     return best_per_label
 
 

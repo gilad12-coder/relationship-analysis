@@ -13,6 +13,7 @@ Output:
 
 import os
 
+import dspy
 import pandas as pd
 from loguru import logger
 from sklearn.metrics import (
@@ -25,14 +26,13 @@ from sklearn.metrics import (
 
 from training.config import (
     FINAL_EVAL_CSV,
-    LABELS,
     METRIC_ZERO_DIVISION,
     POSITIVE_CLASS,
     PREDICTIONS_SUBDIR,
     RESULTS_DIR,
 )
 from training.data.dataset_builder import df_to_examples
-from training.optimization.optimize import OptimizationResult, _temporary_lm
+from training.optimization.optimize import OptimizationResult, _make_lm
 
 
 def _compute_metrics(
@@ -99,72 +99,78 @@ def _compute_metrics(
     return metrics, preds_df
 
 
-def _save_results(rows: list[dict], preds: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Saves the final evaluation CSV and per-label prediction files.
+def _save_label_results(label: str, metrics: dict, preds_df: pd.DataFrame) -> None:
+    """Saves one label's evaluation results to disk immediately.
+
+    Writes the predictions CSV for this label and appends/updates the
+    summary eval CSV so that results are persisted after each label finishes.
 
     Args:
-        rows:  List of metrics dicts, one per label.
-        preds: Dict keyed by label name, value is the predictions DataFrame.
+        label:    Label name.
+        metrics:  Metrics dict for this label.
+        preds_df: Predictions DataFrame for this label.
 
     Returns:
-        Summary DataFrame with one row per label.
-    """
-    preds_dir = os.path.join(RESULTS_DIR, PREDICTIONS_SUBDIR)
-    os.makedirs(preds_dir, exist_ok=True)
-    for label, preds_df in preds.items():
-        path = os.path.join(preds_dir, f"{label}_predictions.csv")
-        preds_df.to_csv(path, index=False)
-        logger.info(f"[{label}] Predictions saved to {path}.")
-    summary_df = pd.DataFrame(rows)
-    summary_path = os.path.join(RESULTS_DIR, FINAL_EVAL_CSV)
-    summary_df.to_csv(summary_path, index=False)
-    logger.info(f"Final evaluation saved to {summary_path}.")
-    logger.info(f"\n{summary_df.to_string(index=False)}")
-    return summary_df
-
-
-def run_dspy(best_per_label: dict, datasets: dict) -> pd.DataFrame:
-    """Evaluates all GEPA-optimised programs on their locked test sets.
-
-    Args:
-        best_per_label: Output of grid_search.run(), keyed by label name,
-                        each value an OptimizationResult.
-        datasets:       Output of dataset_builder.build(), keyed by label name.
-
-    Returns:
-        Summary DataFrame with one row per label.
+        None.
     """
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    rows = []
-    preds = {}
-    for label in LABELS:
-        result: OptimizationResult = best_per_label[label]
-        test_df: pd.DataFrame = datasets[label]["test_df"]
-        testset = df_to_examples(test_df, label)
-        y_true, y_pred, texts = [], [], []
-        with _temporary_lm(result.gen_model):
-            for idx, example in enumerate(testset):
-                try:
-                    prediction = result.optimized_program(text=example.text)
-                    pred_label = str(prediction.label).strip().lower()
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"[{label}] Test inference failed at example index {idx}: {exc}"
-                    ) from exc
+    preds_dir = os.path.join(RESULTS_DIR, PREDICTIONS_SUBDIR)
+    os.makedirs(preds_dir, exist_ok=True)
 
-                y_true.append(1 if example.label == POSITIVE_CLASS else 0)
-                y_pred.append(1 if pred_label == POSITIVE_CLASS else 0)
-                texts.append(example.text)
+    path = os.path.join(preds_dir, f"{label}_predictions.csv")
+    preds_df.to_csv(path, index=False)
+    logger.info(f"[{label}] Predictions saved to {path}.")
+
+    summary_path = os.path.join(RESULTS_DIR, FINAL_EVAL_CSV)
+    new_row = pd.DataFrame([metrics])
+    if os.path.isfile(summary_path):
+        existing = pd.read_csv(summary_path)
+        existing = existing[existing["label"] != label]
+        summary_df = pd.concat([existing, new_row], ignore_index=True)
+    else:
+        summary_df = new_row
+    summary_df.to_csv(summary_path, index=False)
+    logger.info(f"[{label}] Evaluation saved to {summary_path}.")
+
+
+def run_dspy_label(
+    label: str, result: OptimizationResult, datasets: dict
+) -> dict:
+    """Evaluates one label's GEPA-optimised program on its locked test set and saves results.
+
+    Args:
+        label:    Label name.
+        result:   OptimizationResult for this label.
+        datasets: Output of dataset_builder.build(), keyed by label name.
+
+    Returns:
+        Metrics dict for this label.
+    """
+    test_df: pd.DataFrame = datasets[label]["test_df"]
+    testset = df_to_examples(test_df, label)
+    y_true, y_pred, texts = [], [], []
+    dspy.configure(lm=_make_lm(result.gen_model))
+    for idx, example in enumerate(testset):
         try:
-            optimized_prompt = result.optimized_program.classify.signature.__doc__ or ""
-        except AttributeError:
-            optimized_prompt = ""
-        extra = {
-            "gen_model": result.gen_model,
-            "reflection_model": result.reflection_model,
-            "optimized_prompt": optimized_prompt,
-        }
-        metrics, preds_df = _compute_metrics(label, y_true, y_pred, texts, extra)
-        rows.append(metrics)
-        preds[label] = preds_df
-    return _save_results(rows, preds)
+            prediction = result.optimized_program(text=example.text)
+            pred_label = str(prediction.label).strip().lower()
+        except Exception as exc:
+            raise RuntimeError(
+                f"[{label}] Test inference failed at example index {idx}: {exc}"
+            ) from exc
+
+        y_true.append(1 if example.label == POSITIVE_CLASS else 0)
+        y_pred.append(1 if pred_label == POSITIVE_CLASS else 0)
+        texts.append(example.text)
+    try:
+        optimized_prompt = result.optimized_program.classify.signature.__doc__ or ""
+    except AttributeError:
+        optimized_prompt = ""
+    extra = {
+        "gen_model": result.gen_model,
+        "reflection_model": result.reflection_model,
+        "optimized_prompt": optimized_prompt,
+    }
+    metrics, preds_df = _compute_metrics(label, y_true, y_pred, texts, extra)
+    _save_label_results(label, metrics, preds_df)
+    return metrics
