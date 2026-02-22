@@ -1,0 +1,51 @@
+text,romantic,family,friendship,professional,unknown,irrelevant
+"She kissed him softly on the forehead before they fell asleep together.",true,false,false,false,false,false
+"My mother called me every Sunday without fail for twenty years.",false,true,false,false,false,false
+"We've been best friends since third grade and still talk every day.",false,false,true,false,false,false
+"The manager scheduled a one-on-one meeting with her direct report.",false,false,false,true,false,false
+"The two of them were seen leaving the building together.",false,false,false,false,true,false
+"The stock market rose three percent on Tuesday.",false,false,false,false,false,true
+"He proposed to her on the beach at sunset and she said yes.",true,false,false,false,false,false
+"My brother and I used to fight constantly but now we're inseparable.",false,true,false,false,false,false
+"They grabbed beers after work and laughed about the old days.",false,false,true,false,false,false
+"The CEO praised the intern's presentation in front of the whole team.",false,false,false,true,false,false
+"I love the way you look at me when no one else is watching.",true,false,false,false,false,false
+"Grandma always saved the biggest piece of cake for me.",false,true,false,false,false,false
+"She was my roommate in college and the person I trusted most.",false,false,true,false,false,false
+"The client sent a formal complaint to the account manager.",false,false,false,true,false,false
+"They seemed close but nobody could tell what their relationship was.",false,false,false,false,true,false
+"Rain is expected throughout the weekend across the region.",false,false,false,false,false,true
+"They held hands while walking through the park on their anniversary.",true,false,false,false,false,false
+"My father taught me how to ride a bike when I was five.",false,true,false,false,false,false
+"Jake and I have a standing poker night every Thursday.",false,false,true,false,false,false
+"The professor wrote a recommendation letter for her PhD student.",false,false,false,true,false,false
+"He wrote her a love letter every week while he was deployed.",true,false,false,false,false,false
+"My sister drove three hours just to bring me soup when I was sick.",false,true,false,false,false,false
+"We bonded over our shared love of hiking and never looked back.",false,false,true,false,false,false
+"The business partners signed the contract after months of negotiation.",false,false,false,true,false,false
+"Two people were spotted having a deep conversation at the cafe.",false,false,false,false,true,false
+"The building was constructed in 1987 using reinforced concrete.",false,false,false,false,false,true
+"They danced together all night and couldn't stop smiling.",true,false,false,false,false,false
+"My uncle always told the best stories at family gatherings.",false,true,false,false,false,false
+"She's the kind of friend who shows up at your door when you're sad.",false,false,true,false,false,false
+"The team lead mentored the junior developer throughout the quarter.",false,false,false,true,false,false
+"He couldn't imagine life without her by his side.",true,false,false,false,false,false
+"My daughter drew me a picture and left it on my pillow.",false,true,false,false,false,false
+"We met at a conference and immediately clicked as friends.",false,false,true,false,false,false
+"The surgeon and the anesthesiologist coordinated the procedure smoothly.",false,false,false,true,false,false
+"They exchanged a long look before going their separate ways.",false,false,false,false,true,false
+"The recipe calls for two cups of flour and a pinch of salt.",false,false,false,false,false,true
+"She rested her head on his shoulder during the long flight home.",true,false,false,false,false,false
+"My cousin and I grew up next door to each other.",false,true,false,false,false,false
+"They've carpooled to work together for years and chat the whole way.",false,false,true,true,false,false
+"The vendor delivered the shipment to the warehouse on schedule.",false,false,false,true,false,false
+"He gazed into her eyes and told her she was everything to him.",true,false,false,false,false,false
+"Mom stayed up all night helping me finish my science project.",false,true,false,false,false,false
+"She always saves me a seat at lunch and shares her snacks.",false,false,true,false,false,false
+"The consultant presented the quarterly review to the board of directors.",false,false,false,true,false,false
+"The two neighbors greeted each other warmly but kept their distance.",false,false,false,false,true,false
+"Photosynthesis converts sunlight into chemical energy in plants.",false,false,false,false,false,true
+"They went on a romantic getaway to celebrate their tenth anniversary.",true,true,false,false,false,false
+"My twin brother knows what I'm thinking before I say it.",false,true,false,false,false,false
+"We promised each other we'd travel the world together someday.",false,false,true,false,false,false
+"The new hire shadowed the senior analyst during her first week.",false,false,false,true,false,false
