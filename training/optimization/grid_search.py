@@ -20,6 +20,7 @@ import os
 import dspy
 import pandas as pd
 from loguru import logger
+from tqdm import tqdm
 
 from training.config import (
     GEPA_AUTO,
@@ -163,6 +164,32 @@ def _manifest_matches_trial(
     )
 
 
+def _save_program(
+    label: str, result: optimize.OptimizationResult, dataset_hash: str
+) -> None:
+    """Saves a label's best program to disk and updates the manifest.
+
+    Args:
+        label:        Label name.
+        result:       OptimizationResult with the program to save.
+        dataset_hash: Hash of the dataset used for this optimization.
+    """
+    programs_dir = os.path.join(RESULTS_DIR, PROGRAMS_SUBDIR)
+    label_dir = os.path.join(programs_dir, label)
+    os.makedirs(label_dir, exist_ok=True)
+    result.optimized_program.save(label_dir, save_program=True)
+    manifest = _load_program_manifest()
+    manifest[label] = {
+        "gen_model": result.gen_model,
+        "reflection_model": result.reflection_model,
+        "dataset_hash": dataset_hash,
+    }
+    manifest_path = os.path.join(programs_dir, PROGRAMS_MANIFEST)
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    logger.info(f"[{label}] Program saved to {label_dir}.")
+
+
 def run(datasets: dict, auto: str = None, dataset_hash: str = "") -> dict:
     """Runs the full grid search over all model pairs and all labels.
 
@@ -200,7 +227,7 @@ def run(datasets: dict, auto: str = None, dataset_hash: str = "") -> dict:
     all_results: list[optimize.OptimizationResult] = []
     model_pairs = list(itertools.product(GENERATION_MODELS, REFLECTION_MODELS))
     total_trials = len(LABELS) * len(model_pairs)
-    trial_num = 0
+    pbar = tqdm(total=total_trials, desc="Grid search", unit="trial")
     for label in LABELS:
         if _label_has_all_trials(existing_df, label, dataset_hash):
             logger.info(f"[{label}] All grid search trials found in CSV. Skipping.")
@@ -221,15 +248,17 @@ def run(datasets: dict, auto: str = None, dataset_hash: str = "") -> dict:
                     holdout_recall=row["holdout_recall"],
                     holdout_accuracy=row["holdout_accuracy"],
                 ))
-            trial_num += len(model_pairs)
+            pbar.update(len(model_pairs))
         else:
             trainset = datasets[label]["trainset"]
             valset = datasets[label]["valset"]
             holdout_set = df_to_examples(datasets[label]["holdout_df"], label)
             for gen_model, reflection_model in model_pairs:
-                trial_num += 1
+                gen_short = gen_model.split("/")[-1]
+                refl_short = reflection_model.split("/")[-1]
+                pbar.set_postfix_str(f"{label} | {gen_short}+{refl_short}")
                 logger.info(
-                    f"Trial {trial_num}/{total_trials} | label={label} | "
+                    f"Trial {pbar.n + 1}/{total_trials} | label={label} | "
                     f"gen={gen_model} | reflection={reflection_model}"
                 )
 
@@ -250,13 +279,19 @@ def run(datasets: dict, auto: str = None, dataset_hash: str = "") -> dict:
                 result.holdout_precision = h_p
                 result.holdout_recall = h_r
                 result.holdout_accuracy = h_acc
-                logger.info(
-                    f"[{label}] Holdout | gen={gen_model} | reflection={reflection_model} | "
-                    f"F1={h_f1:.4f} | P={h_p:.4f} | R={h_r:.4f}"
+                pbar.write(
+                    f"  {label} | {gen_short}+{refl_short} | "
+                    f"F1={h_f1:.4f} P={h_p:.4f} R={h_r:.4f}"
                 )
                 all_results.append(result)
-        # Persist progress after every label, including skipped labels loaded from CSV.
-        _save_summary(all_results, dataset_hash)
+                _save_summary(all_results, dataset_hash)
+                pbar.update(1)
+            # Save the best program for this label immediately.
+            label_results = [r for r in all_results if r.label == label and r.optimized_program is not None]
+            if label_results:
+                best_for_label = max(label_results, key=lambda r: (r.holdout_f1, r.holdout_accuracy))
+                _save_program(label, best_for_label, dataset_hash)
+    pbar.close()
     best_per_label = _select_best(all_results)
 
     # Restore programs for labels that were skipped.

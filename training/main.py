@@ -441,14 +441,15 @@ def _run_dspy(args: argparse.Namespace, splits: dict, dataset_hash: str) -> None
             f"{len(LABELS)} labels = {n_pairs * len(LABELS)} trials."
         )
         best_per_label = grid_search.run(datasets=datasets, auto=args.auto, dataset_hash=dataset_hash)
-    # Save programs immediately after optimization (enables resume if eval crashes).
-    manifest_path = os.path.join(RESULTS_DIR, PROGRAMS_SUBDIR, PROGRAMS_MANIFEST)
-    manifest = {}
-    if os.path.isfile(manifest_path):
-        with open(manifest_path) as f:
-            manifest = json.load(f)
-    for label in LABELS:
-        _save_program(label, best_per_label[label], manifest, dataset_hash)
+    if fixed_pair:
+        # Save programs after fixed-pair optimization (grid search saves incrementally).
+        manifest_path = os.path.join(RESULTS_DIR, PROGRAMS_SUBDIR, PROGRAMS_MANIFEST)
+        manifest = {}
+        if os.path.isfile(manifest_path):
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+        for label in LABELS:
+            _save_program(label, best_per_label[label], manifest, dataset_hash)
 
     # Baseline evaluation (un-optimised programs on holdout set).
     logger.info("Step 5a: Baseline evaluation on locked holdout sets.")
