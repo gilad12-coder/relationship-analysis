@@ -96,7 +96,7 @@ def _load_programs() -> None:
                 f"Program directory not found for '{label}' at {label_dir}."
             )
         try:
-            _programs[label] = dspy.load(label_dir)
+            _programs[label] = dspy.load(label_dir, allow_pickle=True)
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to load program for '{label}' from {label_dir}: {exc}"

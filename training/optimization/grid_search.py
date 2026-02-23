@@ -164,6 +164,37 @@ def _manifest_matches_trial(
     )
 
 
+def _manifest_entry_matches_fast_path(
+    manifest: dict,
+    label: str,
+    dataset_hash: str,
+    configured_pairs: set[tuple[str, str]],
+) -> bool:
+    """Checks whether a manifest entry is valid for full fast-path resume.
+
+    Args:
+        manifest:         Loaded programs manifest.
+        label:            Label name.
+        dataset_hash:     Current dataset hash.
+        configured_pairs: Currently configured (gen_model, reflection_model) pairs.
+
+    Returns:
+        True if the entry exists, matches the dataset hash, belongs to current
+        configured model pairs, and has a program directory on disk.
+    """
+    entry = manifest.get(label)
+    if not isinstance(entry, dict):
+        return False
+    gen_model = entry.get("gen_model", "")
+    reflection_model = entry.get("reflection_model", "")
+    if entry.get("dataset_hash", "") != dataset_hash:
+        return False
+    if (gen_model, reflection_model) not in configured_pairs:
+        return False
+    program_dir = os.path.join(RESULTS_DIR, PROGRAMS_SUBDIR, label)
+    return os.path.isdir(program_dir)
+
+
 def _save_program(
     label: str, result: optimize.OptimizationResult, dataset_hash: str
 ) -> None:
@@ -222,6 +253,36 @@ def run(datasets: dict, auto: str = None, dataset_hash: str = "") -> dict:
 
     effective_auto = auto if auto is not None else GEPA_AUTO
 
+    # Fast path: if all labels already have programs with matching dataset hash,
+    # load them and skip the grid search entirely.
+    manifest = _load_program_manifest()
+    configured_pairs = _configured_model_pairs()
+    if dataset_hash and manifest and all(
+        _manifest_entry_matches_fast_path(
+            manifest=manifest,
+            label=label,
+            dataset_hash=dataset_hash,
+            configured_pairs=configured_pairs,
+        )
+        for label in LABELS
+    ):
+        logger.info("All programs match current dataset hash. Loading from disk.")
+        best = {}
+        for label in LABELS:
+            entry = manifest[label]
+            program_dir = os.path.join(RESULTS_DIR, PROGRAMS_SUBDIR, label)
+            best[label] = optimize.OptimizationResult(
+                label=label,
+                gen_model=entry["gen_model"],
+                reflection_model=entry["reflection_model"],
+                optimized_program=dspy.load(program_dir, allow_pickle=True),
+                val_f1=0.0,
+                val_accuracy=0.0,
+            )
+            logger.info(f"[{label}] Loaded from {program_dir}.")
+        _log_best(best)
+        return best
+
     os.makedirs(RESULTS_DIR, exist_ok=True)
     existing_df = _load_existing_csv()
     all_results: list[optimize.OptimizationResult] = []
@@ -249,6 +310,8 @@ def run(datasets: dict, auto: str = None, dataset_hash: str = "") -> dict:
                     holdout_accuracy=row["holdout_accuracy"],
                 ))
             pbar.update(len(model_pairs))
+            # Persist skipped-label rows too, so mixed resume runs keep full CSV coverage.
+            _save_summary(all_results, dataset_hash)
         else:
             trainset = datasets[label]["trainset"]
             valset = datasets[label]["valset"]
@@ -308,7 +371,7 @@ def run(datasets: dict, auto: str = None, dataset_hash: str = "") -> dict:
             dataset_hash=dataset_hash,
         ):
             logger.info(f"[{label}] Loading saved program from {program_dir}.")
-            result.optimized_program = dspy.load(program_dir)
+            result.optimized_program = dspy.load(program_dir, allow_pickle=True)
         else:
             if os.path.isdir(program_dir):
                 logger.warning(

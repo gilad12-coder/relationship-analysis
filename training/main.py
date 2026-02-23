@@ -73,6 +73,7 @@ logger.add(
     format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {message}",
     level=LOG_LEVEL_FILE,
     rotation=LOG_ROTATION,
+    mode="w",
 )
 
 
@@ -234,7 +235,7 @@ def _run_fixed_dspy_pair(
                     label=label,
                     gen_model=gen_model,
                     reflection_model=reflection_model,
-                    optimized_program=dspy.load(program_dir),
+                    optimized_program=dspy.load(program_dir, allow_pickle=True),
                     val_f1=0.0,
                     val_accuracy=0.0,
                 )
@@ -430,6 +431,10 @@ def _run_dspy(args: argparse.Namespace, splits: dict, dataset_hash: str) -> None
                 f"--reflection_model '{args.reflection_model}' not in config.REFLECTION_MODELS."
             )
         logger.info("Step 4: Running fixed model pair (grid search skipped).")
+        gs_path = os.path.join(RESULTS_DIR, GRID_SEARCH_CSV)
+        if os.path.isfile(gs_path):
+            os.remove(gs_path)
+            logger.info(f"Removed stale {GRID_SEARCH_CSV} (not applicable in fixed-pair mode).")
         best_per_label = _run_fixed_dspy_pair(
             datasets, args.gen_model, args.reflection_model, args.auto, dataset_hash
         )

@@ -116,7 +116,9 @@ def _save_label_results(
         summary_df = pd.concat([existing, new_row], ignore_index=True)
     else:
         summary_df = new_row
-    summary_df.to_csv(summary_path, index=False)
+    tmp_path = summary_path + ".tmp"
+    summary_df.to_csv(tmp_path, index=False)
+    os.replace(tmp_path, summary_path)
     logger.info(f"[{label}] {stage} evaluation saved to {summary_path}.")
 
 
@@ -195,7 +197,7 @@ def run_baseline_label(
         y_true.append(1 if example.label == POSITIVE_CLASS else 0)
         y_pred.append(1 if pred_label == POSITIVE_CLASS else 0)
         texts.append(example.text)
-    extra = {"gen_model": gen_model, "dataset_hash": dataset_hash}
+    extra = {"gen_model": gen_model, "dataset_hash": dataset_hash, "reflection_model": "", "optimized_prompt": ""}
     logger.info(f"[{label}] BASELINE (gen={gen_model}):")
     metrics, preds_df = _compute_metrics(label, y_true, y_pred, texts, extra)
     _save_label_results(label, "baseline", metrics, preds_df)

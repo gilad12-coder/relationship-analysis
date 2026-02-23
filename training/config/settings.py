@@ -21,7 +21,7 @@ DATASET_SHEET = "Sheet1"  # ignored for CSV; only .xlsx and .csv are supported
 TEXT_COLUMN = "text"
 
 # ── 2. Labels ───────────────────────────────────────────────────────────────
-LABELS = ["romantic", "family", "friendship", "professional", "unknown", "irrelevant"]
+LABELS = ["professional", "romantic", "family", "friendship", "unknown", "irrelevant"]
 
 # ── 3. Splitting ────────────────────────────────────────────────────────────
 RANDOM_STATE = 42
