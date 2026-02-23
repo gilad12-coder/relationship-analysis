@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from serving.config import (
     LABELS,
+    LM_API_KEY,
     LM_BASE_URL,
     LM_MAX_TOKENS,
     LM_REASONING_EFFORT,
@@ -76,7 +77,11 @@ def _load_programs() -> None:
     anthropic_labels = [
         label
         for label in LABELS
-        if str(_manifest.get(label, "")).startswith("anthropic/")
+        if str(
+            _manifest.get(label, {}).get("gen_model", "")
+            if isinstance(_manifest.get(label), dict)
+            else _manifest.get(label, "")
+        ).startswith("anthropic/")
     ]
     if anthropic_labels:
         raise ValueError(
@@ -91,14 +96,14 @@ def _load_programs() -> None:
                 f"Program directory not found for '{label}' at {label_dir}."
             )
         try:
-            _programs[label] = dspy.load(label_dir, allow_pickle=True)
+            _programs[label] = dspy.load(label_dir)
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to load program for '{label}' from {label_dir}: {exc}"
             ) from exc
-        logger.info(
-            f"[{label}] Program loaded from {label_dir} (gen_model={_manifest[label]})."
-        )
+        entry = _manifest[label]
+        gen = entry["gen_model"] if isinstance(entry, dict) else entry
+        logger.info(f"[{label}] Program loaded from {label_dir} (gen_model={gen}).")
     logger.info(f"All {len(_programs)} programs loaded.")
 
 
@@ -147,10 +152,13 @@ def classify(request: ClassifyRequest):
     details = {}
     for label in LABELS:
         try:
-            gen_model = _manifest[label]
+            entry = _manifest[label]
+            gen_model = entry["gen_model"] if isinstance(entry, dict) else entry
             lm_kwargs = {"temperature": LM_TEMPERATURE, "max_tokens": LM_MAX_TOKENS}
+            if LM_API_KEY:
+                lm_kwargs["api_key"] = LM_API_KEY
             if LM_BASE_URL:
-                lm_kwargs["api_base"] = LM_BASE_URL
+                lm_kwargs["base_url"] = LM_BASE_URL
             name = gen_model.split("/")[-1] if "/" in gen_model else gen_model
             if LM_REASONING_EFFORT and name.startswith("o"):
                 lm_kwargs["reasoning_effort"] = LM_REASONING_EFFORT

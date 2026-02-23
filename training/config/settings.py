@@ -31,8 +31,8 @@ CONFIDENCE_LEVEL = 0.95
 MAX_F1_CI_WIDTH = 0.2
 F1_CONSERVATIVE_ESTIMATE = 0.5
 
-MIN_TEST_SIZE = 0.10
-MAX_TEST_SIZE = 0.30
+MIN_HOLDOUT_SIZE = 0.10
+MAX_HOLDOUT_SIZE = 0.30
 
 # Fraction of the total dataset reserved for val in each mode.
 DSPY_VAL_SIZE = 0.10
@@ -76,7 +76,8 @@ GEPA_TRACK_STATS = True
 # ── 5. Output ───────────────────────────────────────────────────────────────
 RESULTS_DIR = "training/results"
 GRID_SEARCH_CSV = "grid_search_results.csv"
-FINAL_EVAL_CSV = "final_evaluation.csv"
+EVAL_CSV = "evaluation.csv"
+SUMMARY_MD = "summary.md"
 PREDICTIONS_SUBDIR = "predictions"
 PROGRAMS_SUBDIR = "programs"
 PROGRAMS_MANIFEST = "manifest.json"

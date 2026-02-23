@@ -9,8 +9,8 @@ Automatically classify relationship types in text using LLM-optimised prompts. G
 - **6 binary classifiers** — romantic, family, friendship, professional, unknown, irrelevant
 - **Automatic prompt optimisation** via GEPA (Genetic-Pareto evolutionary search)
 - **Grid search** across configured generation/reflection model pairs
-- **Statistically sized test sets** — per-label test size targets enough positives for reliable F1 confidence intervals when data allows
-- **Dual split support** — identical locked test sets for both DSPy prompt tuning and transformer fine-tuning
+- **Statistically sized selection holdout sets** — per-label holdout size targets enough positives for reliable F1 confidence intervals when data allows
+- **Dual split support** — identical locked selection holdout sets for both DSPy prompt tuning and transformer fine-tuning
 - **Serving endpoint** — FastAPI server loads optimised programs and classifies text via REST API
 
 ---
@@ -79,7 +79,7 @@ Label columns accept any of these as truthy: `True`, `"true"`, `"yes"`, `"YES"`,
 ## Quick Start
 
 1. **Explore the data** — open `analysis.ipynb` and run the pre-training cells to inspect label distributions, class balance, and text characteristics.
-2. **Train** — open `train.ipynb` and run all cells. This runs the full grid search (54 trials: 3 gen × 3 reflection × 6 labels), evaluates the best program per label on a locked test set, saves programs, and smoke-tests the API.
+2. **Train** — open `train.ipynb` and run all cells. This runs the full grid search (54 trials: 3 gen × 3 reflection × 6 labels), evaluates the best program per label on a locked selection holdout set, saves programs, and smoke-tests the API.
 3. **Analyse results** — go back to `analysis.ipynb` and run the post-training cells for grid search heatmaps, confusion matrices, and error analysis.
 4. **Serve** — run `python serve.py` to start the API.
 
@@ -153,7 +153,7 @@ curl -X POST http://localhost:8000/classify \
   1. Load & normalise labels
         |
         v
-  2. Split per label ──> locked test set (shared)
+  2. Split per label ──> locked selection holdout set (shared)
         |                       |
         v                       v
    DSPy splits           Transformer splits
@@ -173,7 +173,7 @@ curl -X POST http://localhost:8000/classify \
         |
         v
   5. Evaluate best program per label
-     on locked test set (once)
+     on locked selection holdout set (once)
         |
         v
   6. Save optimised programs to disk
@@ -185,15 +185,15 @@ curl -X POST http://localhost:8000/classify \
 **Steps in detail:**
 
 1. **Load** the dataset and normalise label columns to booleans.
-2. **Split** the data per label. The test set is locked first from label statistics alone, then DSPy train/val splits and transformer trainval pools are produced from the remaining data.
+2. **Split** the data per label. The selection holdout set is locked first from label statistics alone, then DSPy train/val splits and transformer trainval pools are produced from the remaining data.
 3. **Build** `dspy.Example` objects from the DSPy splits.
 4. **Optimise** prompts via GEPA grid search (or a fixed model pair). Each trial compiles a `ChainOfThought` program on the training set and scores it on the validation set.
-5. **Evaluate** the best program per label on the locked test set exactly once.
-6. **Save** the optimised programs to `training/results/programs/` with a manifest mapping each label to its generation model.
+5. **Evaluate** the best program per label on the locked selection holdout set exactly once.
+6. **Save** the optimised programs to `training/results/programs/` with a manifest mapping each label to its selected models and dataset hash.
 
 ## Data Splitting
 
-The split pipeline computes a per-label test size that targets enough positive examples for a reliable F1 confidence interval, and warns when the dataset is too sparse to meet that target. Both DSPy and transformer splits share the same locked test set:
+The split pipeline computes a per-label holdout size that targets enough positive examples for a reliable F1 confidence interval, and warns when the dataset is too sparse to meet that target. Both DSPy and transformer splits share the same locked selection holdout set:
 
 - **DSPy splits** — large train (for GEPA reflection sampling), small val (for Pareto tracking).
 - **Transformer splits** — full trainval pool only (you decide downstream how to split or use it).
@@ -205,14 +205,14 @@ from training.data.split_pipeline import run
 
 splits = run(df)
 
-splits.romantic.test                      # shared test set
+splits.romantic.holdout                   # shared selection holdout set
 splits.romantic.dspy.train                # GEPA train
 splits.romantic.dspy.val                  # GEPA val
 splits.romantic.transformer.trainval      # full transformer train pool
 
 # Key access also works for loops:
 for label in LABELS:
-    splits[label].test
+    splits[label].holdout
 ```
 
 ## Project Structure
@@ -235,7 +235,7 @@ training/
         optimize.py                  Single GEPA run for one (label, model pair) trial
         grid_search.py               Grid search over all model pairs and labels
     evaluation/
-        evaluate.py                  Final test-set evaluation
+        evaluate.py                  Final holdout-set evaluation
 serving/
     config/
         settings.py                  Serving-specific settings
@@ -252,10 +252,10 @@ Results are written to the `training/results/` directory:
 | File | Description |
 |---|---|
 | `grid_search_results.csv` | All trial results with val F1 scores |
-| `final_evaluation.csv` | Test metrics for the best model per label |
-| `predictions/{label}_predictions.csv` | Per-example predictions with gold, predicted, and correctness |
+| `evaluation.csv` | Holdout metrics for baseline and optimized runs (`stage` column) |
+| `predictions/{stage}_{label}_predictions.csv` | Per-example predictions with gold, predicted, and correctness |
 | `programs/{label}/` | Serialised optimised program per label (for serving) |
-| `programs/manifest.json` | Maps each label to its best generation model |
+| `programs/manifest.json` | Maps each label to `gen_model`, `reflection_model`, and `dataset_hash` |
 | `pipeline.log` | Full debug log |
 
 ## Configuration
@@ -268,6 +268,6 @@ All tuneable settings live in `training/config/settings.py`. Key options:
 | `GENERATION_MODELS` | gpt-4o-mini, gpt-4o, gpt-4.1-mini | Models used for generation |
 | `REFLECTION_MODELS` | gpt-4o, o4-mini, gpt-4.1 | Models used for GEPA reflection |
 | `GEPA_AUTO` | `"heavy"` | GEPA iteration budget (`light` / `medium` / `heavy`) |
-| `CONFIDENCE_LEVEL` | 0.95 | Confidence level for test-set F1 CI sizing |
+| `CONFIDENCE_LEVEL` | 0.95 | Confidence level for holdout-set F1 CI sizing |
 
 Fixed constants (not tuneable) live in `training/config/constants.py`.

@@ -2,7 +2,7 @@
 Dataset Builder
 ===============
 
-Converts the per-label DSPy train/val/test DataFrames produced by
+Converts the per-label DSPy train/val/holdout DataFrames produced by
 split_pipeline into the dspy.Example lists consumed by GEPA optimization
 and evaluation.
 """
@@ -40,25 +40,25 @@ def build(splits: dict) -> dict:
 
     Args:
         splits: Output of split_pipeline.run(). Keyed by label name, each
-                a LabelSplit with .test, .dspy.train, .dspy.val.
+                a LabelSplit with .holdout, .dspy.train, .dspy.val.
 
     Returns:
         Dict keyed by label name, each containing:
-            - trainset: list[dspy.Example] for GEPA reflective updates.
-            - valset:   list[dspy.Example] for Pareto tracking and model selection.
-            - test_df:  pd.DataFrame, locked and passed through untouched.
+            - trainset:    list[dspy.Example] for GEPA reflective updates.
+            - valset:      list[dspy.Example] for Pareto tracking and model selection.
+            - holdout_df:  pd.DataFrame, locked selection holdout passed through untouched.
     """
     datasets = {}
     for label in LABELS:
         train_df = splits[label].dspy.train
         val_df = splits[label].dspy.val
-        test_df = splits[label].test
+        holdout_df = splits[label].holdout
         trainset = df_to_examples(train_df, label)
         valset = df_to_examples(val_df, label)
         datasets[label] = {
             "trainset": trainset,
             "valset": valset,
-            "test_df": test_df,
+            "holdout_df": holdout_df,
         }
         n_train_pos = sum(1 for e in trainset if e.label == "true")
         n_val_pos = sum(1 for e in valset if e.label == "true")
@@ -66,6 +66,6 @@ def build(splits: dict) -> dict:
             f"Label '{label}': "
             f"trainset={len(trainset)} ({n_train_pos} pos) | "
             f"valset={len(valset)} ({n_val_pos} pos) | "
-            f"test={len(test_df)} ({int(test_df[label].sum())} pos)."
+            f"holdout={len(holdout_df)} ({int(holdout_df[label].sum())} pos)."
         )
     return datasets

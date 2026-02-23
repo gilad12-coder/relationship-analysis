@@ -3,9 +3,13 @@ Dataset Split Pipeline
 ======================
 
 Produces per-label splits for both DSPy/GEPA prompt optimisation and
-transformer fine-tuning in a single run. The test set is locked first from
-label statistics alone — before any mode-specific decisions — so it is
-identical across both split types.
+transformer fine-tuning in a single run. The selection holdout set is locked
+first from label statistics alone — before any mode-specific decisions — so it
+is identical across both split types.
+
+Note: the holdout set is used for model selection (grid search), NOT as a
+clean final test set. Use a separate production test set for unbiased
+reporting.
 
 DSPy splits
 -----------
@@ -23,7 +27,7 @@ Return structure of run()
 -------------------------
 A ``Splits`` object with one attribute per label. Access via dot notation::
 
-    splits.romantic.test               # shared test DataFrame
+    splits.romantic.holdout            # selection holdout DataFrame
     splits.romantic.dspy.train         # GEPA training DataFrame
     splits.romantic.dspy.val           # GEPA validation DataFrame
     splits.romantic.transformer.trainval  # full transformer pool
@@ -46,8 +50,8 @@ from training.config import (
     F1_CONSERVATIVE_ESTIMATE,
     LABELS,
     MAX_F1_CI_WIDTH,
-    MAX_TEST_SIZE,
-    MIN_TEST_SIZE,
+    MAX_HOLDOUT_SIZE,
+    MIN_HOLDOUT_SIZE,
     RANDOM_STATE,
     RESULTS_DIR,
     SPLITS_SUBDIR,
@@ -69,7 +73,7 @@ class TransformerSplit:
 
 @dataclass
 class LabelSplit:
-    test: pd.DataFrame
+    holdout: pd.DataFrame
     dspy: DspySplit
     transformer: TransformerSplit
 
@@ -224,7 +228,7 @@ def _split_with_optional_stratify(
         split_name: Human-readable split name for log/error messages.
 
     Returns:
-        Tuple of (train_df, test_df) from train_test_split.
+        Tuple of (train_df, holdout_df) from train_test_split.
     """
     n_rows = len(df)
     if n_rows < 2:
@@ -232,14 +236,14 @@ def _split_with_optional_stratify(
             f"Label '{label}' | {split_name}: need at least 2 rows to split, got {n_rows}."
         )
     if isinstance(test_size, float):
-        test_rows = math.ceil(n_rows * test_size)
+        holdout_rows = math.ceil(n_rows * test_size)
     else:
-        test_rows = int(test_size)
-    train_rows = n_rows - test_rows
-    if test_rows < 1 or train_rows < 1:
+        holdout_rows = int(test_size)
+    train_rows = n_rows - holdout_rows
+    if holdout_rows < 1 or train_rows < 1:
         raise ValueError(
             f"Label '{label}' | {split_name}: invalid split for n={n_rows}, "
-            f"test_size={test_size} (would produce train={train_rows}, test={test_rows})."
+            f"test_size={test_size} (would produce train={train_rows}, holdout={holdout_rows})."
         )
     can_stratify, reason = _can_stratify(df[label])
     kwargs = {"test_size": test_size, "random_state": random_state}
@@ -270,12 +274,12 @@ def compute_cooccurrence_matrix(df: pd.DataFrame, labels: list[str]) -> pd.DataF
     return co
 
 
-def compute_min_test_positives(
+def compute_min_holdout_positives(
     confidence_level: float = CONFIDENCE_LEVEL,
     max_ci_width: float = MAX_F1_CI_WIDTH,
     f1_estimate: float = F1_CONSERVATIVE_ESTIMATE,
 ) -> int:
-    """Computes the minimum number of positive test examples for a reliable F1 estimate.
+    """Computes the minimum number of positive holdout examples for a reliable F1 estimate.
 
     Formula: n_min = z^2 * f1 * (1 - f1) / (half_width^2)
 
@@ -285,90 +289,90 @@ def compute_min_test_positives(
         f1_estimate:      Assumed F1 value; 0.5 is most conservative.
 
     Returns:
-        Minimum number of TRUE examples required in the test set.
+        Minimum number of TRUE examples required in the holdout set.
     """
     z = Z_SCORES.get(confidence_level, DEFAULT_Z_SCORE)
     half_width = max_ci_width / 2
     return math.ceil(z**2 * f1_estimate * (1 - f1_estimate) / half_width**2)
 
 
-def compute_test_size_per_label(
+def compute_holdout_size_per_label(
     stats: dict,
     labels: list[str],
-    min_test_positives: int,
+    min_holdout_positives: int,
 ) -> dict:
-    """Determines the test set size for each label from label statistics alone.
+    """Determines the holdout set size for each label from label statistics alone.
 
     Args:
-        stats:              Output of compute_label_statistics.
-        labels:             Label column names.
-        min_test_positives: Minimum TRUE examples required in the test set.
+        stats:                 Output of compute_label_statistics.
+        labels:                Label column names.
+        min_holdout_positives: Minimum TRUE examples required in the holdout set.
 
     Returns:
         A dict keyed by label name, each containing:
-            - test_size: float fraction to hold out as the test set.
-            - projected_test_positives: estimated TRUE count in the test set.
+            - holdout_size: float fraction to hold out for model selection.
+            - projected_holdout_positives: estimated TRUE count in the holdout set.
             - sufficient: bool indicating whether the CI threshold is met.
     """
-    test_sizes = {}
+    holdout_sizes = {}
     for label in labels:
         true_count = stats[label]["true_count"]
-        required = min_test_positives / true_count if true_count > 0 else MAX_TEST_SIZE
-        clamped = max(MIN_TEST_SIZE, min(required, MAX_TEST_SIZE))
+        required = min_holdout_positives / true_count if true_count > 0 else MAX_HOLDOUT_SIZE
+        clamped = max(MIN_HOLDOUT_SIZE, min(required, MAX_HOLDOUT_SIZE))
         projected = int(true_count * clamped)
-        sufficient = projected >= min_test_positives
+        sufficient = projected >= min_holdout_positives
         if not sufficient:
             logger.warning(
                 f"Label '{label}': {true_count} total positives. "
-                f"Even at MAX_TEST_SIZE={MAX_TEST_SIZE}, test set yields only "
-                f"~{projected} positives, below the required {min_test_positives}. "
+                f"Even at MAX_HOLDOUT_SIZE={MAX_HOLDOUT_SIZE}, holdout yields only "
+                f"~{projected} positives, below the required {min_holdout_positives}. "
                 f"Consider collecting more data for this label."
             )
         else:
             logger.info(
-                f"Label '{label}': test_size={clamped:.2f}, "
-                f"~{projected} test positives (satisfies CI requirement)."
+                f"Label '{label}': holdout_size={clamped:.2f}, "
+                f"~{projected} holdout positives (satisfies CI requirement)."
             )
 
-        test_sizes[label] = {
-            "test_size": clamped,
-            "projected_test_positives": projected,
+        holdout_sizes[label] = {
+            "holdout_size": clamped,
+            "projected_holdout_positives": projected,
             "sufficient": sufficient,
         }
-    return test_sizes
+    return holdout_sizes
 
 
-def _lock_test_sets(
+def _lock_holdout_sets(
     df: pd.DataFrame,
     labels: list[str],
-    test_size_config: dict,
+    holdout_size_config: dict,
     random_state: int,
 ) -> dict:
-    """Carves out and locks the test set for each label.
+    """Carves out and locks the selection holdout set for each label.
 
     Args:
-        df:               Full dataset with TEXT_COLUMN and label columns.
-        labels:           Label column names.
-        test_size_config: Output of compute_test_size_per_label.
-        random_state:     Random seed.
+        df:                  Full dataset with TEXT_COLUMN and label columns.
+        labels:              Label column names.
+        holdout_size_config: Output of compute_holdout_size_per_label.
+        random_state:        Random seed.
 
     Returns:
-        Dict keyed by label name mapping to (trainval_df, test_df) tuples.
+        Dict keyed by label name mapping to (trainval_df, holdout_df) tuples.
     """
     locked = {}
     for label in labels:
-        trainval, test = _split_with_optional_stratify(
+        trainval, holdout = _split_with_optional_stratify(
             df[[TEXT_COLUMN, label]],
             label=label,
-            test_size=test_size_config[label]["test_size"],
+            test_size=holdout_size_config[label]["holdout_size"],
             random_state=random_state,
-            split_name="test lock",
+            split_name="holdout lock",
         )
-        locked[label] = (trainval, test)
-        pos = int(test[label].sum())
+        locked[label] = (trainval, holdout)
+        pos = int(holdout[label].sum())
         logger.info(
-            f"Label '{label}' | test locked: {len(test)} rows, "
-            f"{pos} TRUE ({pos / len(test) * 100:.1f}%) | "
+            f"Label '{label}' | holdout locked: {len(holdout)} rows, "
+            f"{pos} TRUE ({pos / len(holdout) * 100:.1f}%) | "
             f"trainval remaining: {len(trainval)} rows."
         )
     return locked
@@ -383,10 +387,10 @@ def _make_dspy_splits(
     """Creates DSPy train and val splits from the locked trainval data.
 
     The val fraction is expressed relative to the full dataset so it remains
-    proportional regardless of how large the test set is per label.
+    proportional regardless of how large the holdout set is per label.
 
     Args:
-        locked:        Output of _lock_test_sets.
+        locked:        Output of _lock_holdout_sets.
         labels:        Label column names.
         dspy_val_size: Fraction of the full dataset reserved for val.
         random_state:  Random seed.
@@ -396,9 +400,9 @@ def _make_dspy_splits(
     """
     result = {}
     for label in labels:
-        trainval, test = locked[label]
-        test_frac = len(test) / (len(trainval) + len(test))
-        relative_val = min(dspy_val_size / (1.0 - test_frac), 0.5)
+        trainval, holdout = locked[label]
+        holdout_frac = len(holdout) / (len(trainval) + len(holdout))
+        relative_val = min(dspy_val_size / (1.0 - holdout_frac), 0.5)
         train, val = _split_with_optional_stratify(
             trainval,
             label=label,
@@ -423,7 +427,7 @@ def _make_transformer_splits(
     """Returns the transformer trainval pool from each locked split.
 
     Args:
-        locked: Output of _lock_test_sets.
+        locked: Output of _lock_holdout_sets.
         labels: Label column names.
 
     Returns:
@@ -444,7 +448,7 @@ def _make_transformer_splits(
 def run(df: pd.DataFrame) -> Splits:
     """Runs the full split pipeline for all labels.
 
-    Locks test sets first (identical across both split types), then produces
+    Locks holdout sets first (identical across both split types), then produces
     DSPy train/val splits plus transformer trainval pools.
 
     Args:
@@ -453,7 +457,7 @@ def run(df: pd.DataFrame) -> Splits:
     Returns:
         A Splits object. Access per-label data via attribute::
 
-            splits.romantic.test
+            splits.romantic.holdout
             splits.romantic.dspy.train
             splits.romantic.transformer.trainval
 
@@ -469,17 +473,17 @@ def run(df: pd.DataFrame) -> Splits:
         )
     co = compute_cooccurrence_matrix(df, LABELS)
     logger.info(f"Co-occurrence matrix:\n{co.to_string()}")
-    min_test_positives = compute_min_test_positives()
-    logger.info(f"Minimum test positives required per label: {min_test_positives}.")
-    test_size_config = compute_test_size_per_label(stats, LABELS, min_test_positives)
-    logger.info("Locking test sets.")
-    locked = _lock_test_sets(df, LABELS, test_size_config, RANDOM_STATE)
+    min_holdout_positives = compute_min_holdout_positives()
+    logger.info(f"Minimum holdout positives required per label: {min_holdout_positives}.")
+    holdout_size_config = compute_holdout_size_per_label(stats, LABELS, min_holdout_positives)
+    logger.info("Locking selection holdout sets.")
+    locked = _lock_holdout_sets(df, LABELS, holdout_size_config, RANDOM_STATE)
     dspy_splits = _make_dspy_splits(locked, LABELS, DSPY_VAL_SIZE, RANDOM_STATE)
     transformer_splits = _make_transformer_splits(locked, LABELS)
     per_label = {}
     for label in LABELS:
         per_label[label] = LabelSplit(
-            test=locked[label][1],
+            holdout=locked[label][1],
             dspy=DspySplit(
                 train=dspy_splits[label]["train"],
                 val=dspy_splits[label]["val"],
@@ -509,7 +513,7 @@ def save(splits: Splits) -> None:
     for label in LABELS:
         label_split = splits[label]
         parts = [
-            (label_split.test, "test"),
+            (label_split.holdout, "holdout"),
             (label_split.dspy.train, "dspy_train"),
             (label_split.dspy.val, "dspy_val"),
             (label_split.transformer.trainval, "transformer_trainval"),

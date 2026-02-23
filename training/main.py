@@ -5,14 +5,13 @@ Main Pipeline Entry Point
 Runs the full relationship classification pipeline end to end:
 
   1. Load dataset.
-  2. Split (produces both DSPy and transformer splits with a shared test set).
+  2. Split (produces both DSPy and transformer splits with a shared selection holdout).
   3. Build dspy.Example objects.
   4. Grid search over all (generation_model, reflection_model) pairs,
-     running GEPA independently for each label, ranked by val F1.
-  5. Evaluate the best program per label on its locked test set once.
-
-The test set is locked from label statistics alone before any training
-decisions are made, and is identical across both split types.
+     running GEPA independently for each label, ranked by holdout F1.
+  5a. Baseline evaluation on locked holdout sets.
+  5b. Optimised evaluation on locked holdout sets.
+  6. Generate summary.md.
 
 Usage
 -----
@@ -22,6 +21,7 @@ Usage
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -31,9 +31,11 @@ import pandas as pd
 from loguru import logger
 
 from training.config import (
+    CONFIDENCE_LEVEL,
     DATASET_PATH,
     DATASET_SHEET,
-    FINAL_EVAL_CSV,
+    DSPY_VAL_SIZE,
+    EVAL_CSV,
     GEPA_AUTO,
     GENERATION_MODELS,
     GRID_SEARCH_CSV,
@@ -43,10 +45,15 @@ from training.config import (
     LOG_LEVEL_CONSOLE,
     LOG_LEVEL_FILE,
     LOG_ROTATION,
+    MAX_F1_CI_WIDTH,
+    MAX_HOLDOUT_SIZE,
+    MIN_HOLDOUT_SIZE,
     PROGRAMS_MANIFEST,
     PROGRAMS_SUBDIR,
+    RANDOM_STATE,
     REFLECTION_MODELS,
     RESULTS_DIR,
+    SUMMARY_MD,
     SUPPORTED_EXTENSIONS,
     TEXT_COLUMN,
 )
@@ -128,6 +135,29 @@ def load_dataset() -> pd.DataFrame:
     return df
 
 
+def _dataset_hash(df: pd.DataFrame) -> str:
+    """Computes a short content hash of the normalised dataset and split config.
+
+    Covers both data changes and split-config changes (val size, holdout
+    bounds, random state, CI settings) so any parameter that affects the
+    splits also invalidates cached artifacts.
+
+    Args:
+        df: Normalised DataFrame (after label conversion and NA drop).
+
+    Returns:
+        A 16-character hex digest.
+    """
+    cols = [TEXT_COLUMN] + LABELS
+    content = df[cols].sort_values(cols, kind="mergesort").to_csv(index=False)
+    config_str = (
+        f"RANDOM_STATE={RANDOM_STATE}|DSPY_VAL_SIZE={DSPY_VAL_SIZE}|"
+        f"MIN_HOLDOUT_SIZE={MIN_HOLDOUT_SIZE}|MAX_HOLDOUT_SIZE={MAX_HOLDOUT_SIZE}|"
+        f"CONFIDENCE_LEVEL={CONFIDENCE_LEVEL}|MAX_F1_CI_WIDTH={MAX_F1_CI_WIDTH}"
+    )
+    return hashlib.sha256((content + config_str).encode()).hexdigest()[:16]
+
+
 def parse_args() -> argparse.Namespace:
     """Parses CLI arguments for the training entrypoint.
 
@@ -166,36 +196,57 @@ def _run_fixed_dspy_pair(
     gen_model: str,
     reflection_model: str,
     auto: str,
+    dataset_hash: str,
 ) -> dict:
     """Runs GEPA for all labels with a single fixed model pair, skipping grid search.
 
     Supports resuming: labels with a saved program on disk are loaded
-    instead of re-optimized.
+    instead of re-optimized, provided the manifest matches the requested
+    model pair and current dataset hash.
 
     Args:
         datasets:         Output of dataset_builder.build().
         gen_model:        DSPy generation model string.
         reflection_model: DSPy reflection model string.
         auto:             GEPA budget.
+        dataset_hash:     Hash of the current dataset for staleness detection.
 
     Returns:
         Dict keyed by label name, each value an OptimizationResult.
     """
     logger.info(f"Fixed pair: gen={gen_model} | reflection={reflection_model}.")
+    manifest_path = os.path.join(RESULTS_DIR, PROGRAMS_SUBDIR, PROGRAMS_MANIFEST)
+    manifest = {}
+    if os.path.isfile(manifest_path):
+        with open(manifest_path) as f:
+            manifest = json.load(f)
     best_per_label = {}
     for label in LABELS:
         program_dir = os.path.join(RESULTS_DIR, PROGRAMS_SUBDIR, label)
         if os.path.isdir(program_dir):
-            logger.info(f"[{label}] Saved program found. Loading instead of re-optimizing.")
-            best_per_label[label] = optimize.OptimizationResult(
-                label=label,
-                gen_model=gen_model,
-                reflection_model=reflection_model,
-                optimized_program=dspy.load(program_dir, allow_pickle=True),
-                val_f1=0.0,
-                val_accuracy=0.0,
+            entry = manifest.get(label, {})
+            saved_gen = entry.get("gen_model", "") if isinstance(entry, dict) else entry
+            saved_refl = entry.get("reflection_model", "") if isinstance(entry, dict) else ""
+            saved_hash = entry.get("dataset_hash", "") if isinstance(entry, dict) else ""
+            if saved_gen == gen_model and saved_refl == reflection_model and saved_hash == dataset_hash:
+                logger.info(f"[{label}] Saved program matches requested pair and dataset. Loading.")
+                best_per_label[label] = optimize.OptimizationResult(
+                    label=label,
+                    gen_model=gen_model,
+                    reflection_model=reflection_model,
+                    optimized_program=dspy.load(program_dir),
+                    val_f1=0.0,
+                    val_accuracy=0.0,
+                )
+                continue
+            reason = []
+            if saved_gen != gen_model or saved_refl != reflection_model:
+                reason.append(f"model pair (gen={saved_gen}, reflection={saved_refl})")
+            if saved_hash != dataset_hash:
+                reason.append("dataset content")
+            logger.warning(
+                f"[{label}] Saved program stale — {' and '.join(reason)} changed. Re-optimizing."
             )
-            continue
         best_per_label[label] = optimize.run(
             label=label,
             gen_model=gen_model,
@@ -207,29 +258,63 @@ def _run_fixed_dspy_pair(
     return best_per_label
 
 
-def _label_eval_exists(label: str) -> bool:
-    """Checks if a label already has a row in the final evaluation CSV.
+_REQUIRED_EVAL_COLUMNS = {"holdout_f1", "holdout_precision", "holdout_recall", "holdout_accuracy"}
+
+
+def _eval_exists(
+    label: str,
+    stage: str,
+    gen_model: str = None,
+    reflection_model: str = None,
+    dataset_hash: str = None,
+) -> bool:
+    """Checks if a label+stage already has a matching row in the evaluation CSV.
+
+    When model identifiers or dataset_hash are provided, the saved row must
+    match them. Returns False if the CSV is missing the expected holdout
+    metric columns (legacy schema), model columns, or dataset_hash column,
+    so stale rows are never reused.
 
     Args:
-        label: Label name.
+        label:            Label name.
+        stage:            'baseline' or 'optimized'.
+        gen_model:        If set, the row must match this gen_model.
+        reflection_model: If set, the row must match this reflection_model.
+        dataset_hash:     If set, the row must match this dataset hash.
 
     Returns:
-        True if the eval CSV exists and contains a row for this label.
+        True if a matching row exists.
     """
-    eval_path = os.path.join(RESULTS_DIR, FINAL_EVAL_CSV)
+    eval_path = os.path.join(RESULTS_DIR, EVAL_CSV)
     if not os.path.isfile(eval_path):
         return False
     eval_df = pd.read_csv(eval_path)
-    return label in eval_df["label"].values
+    if not _REQUIRED_EVAL_COLUMNS.issubset(eval_df.columns):
+        return False
+    if gen_model and "gen_model" not in eval_df.columns:
+        return False
+    if reflection_model and "reflection_model" not in eval_df.columns:
+        return False
+    if dataset_hash and "dataset_hash" not in eval_df.columns:
+        return False
+    mask = (eval_df["label"] == label) & (eval_df["stage"] == stage)
+    if gen_model:
+        mask = mask & (eval_df["gen_model"] == gen_model)
+    if reflection_model:
+        mask = mask & (eval_df["reflection_model"] == reflection_model)
+    if dataset_hash:
+        mask = mask & (eval_df["dataset_hash"] == dataset_hash)
+    return mask.any()
 
 
-def _save_program(label: str, result, manifest: dict) -> None:
+def _save_program(label: str, result, manifest: dict, dataset_hash: str) -> None:
     """Saves a single label's optimized program to disk and updates the manifest.
 
     Args:
-        label:    Label name.
-        result:   OptimizationResult for this label.
-        manifest: Shared manifest dict (mutated in place, then written to disk).
+        label:        Label name.
+        result:       OptimizationResult for this label.
+        manifest:     Shared manifest dict (mutated in place, then written to disk).
+        dataset_hash: Hash of the dataset used for this optimization.
 
     Returns:
         None.
@@ -238,7 +323,11 @@ def _save_program(label: str, result, manifest: dict) -> None:
     label_dir = os.path.join(programs_dir, label)
     os.makedirs(label_dir, exist_ok=True)
     result.optimized_program.save(label_dir, save_program=True)
-    manifest[label] = result.gen_model
+    manifest[label] = {
+        "gen_model": result.gen_model,
+        "reflection_model": result.reflection_model,
+        "dataset_hash": dataset_hash,
+    }
     logger.info(f"[{label}] Program saved to {label_dir}.")
     manifest_path = os.path.join(programs_dir, PROGRAMS_MANIFEST)
     with open(manifest_path, "w") as f:
@@ -246,12 +335,69 @@ def _save_program(label: str, result, manifest: dict) -> None:
     logger.info(f"Manifest saved to {manifest_path}.")
 
 
-def _run_dspy(args: argparse.Namespace, splits: dict) -> None:
+def _write_summary_md() -> None:
+    """Generates a human-readable Markdown summary of evaluation results.
+
+    Reads the evaluation CSV and writes one section per label with a
+    baseline vs optimised comparison table.
+    """
+    eval_path = os.path.join(RESULTS_DIR, EVAL_CSV)
+    if not os.path.isfile(eval_path):
+        logger.warning("No evaluation CSV found; skipping summary.md generation.")
+        return
+
+    eval_df = pd.read_csv(eval_path)
+    lines = ["# Results Summary", ""]
+
+    for label in LABELS:
+        label_rows = eval_df[eval_df["label"] == label]
+        if label_rows.empty:
+            continue
+
+        baseline = label_rows[label_rows["stage"] == "baseline"]
+        optimized = label_rows[label_rows["stage"] == "optimized"]
+
+        lines.append(f"## {label}")
+        lines.append("")
+
+        if not baseline.empty and not optimized.empty:
+            b = baseline.iloc[0]
+            o = optimized.iloc[0]
+            lines.append("| Metric    | Baseline | Optimized |")
+            lines.append("|-----------|----------|-----------|")
+            lines.append(f"| F1        | {b['holdout_f1']:.4f}   | {o['holdout_f1']:.4f}    |")
+            lines.append(f"| Precision | {b['holdout_precision']:.4f}   | {o['holdout_precision']:.4f}    |")
+            lines.append(f"| Recall    | {b['holdout_recall']:.4f}   | {o['holdout_recall']:.4f}    |")
+            lines.append(f"| Accuracy  | {b['holdout_accuracy']:.4f}   | {o['holdout_accuracy']:.4f}    |")
+            lines.append("")
+            gen = o.get("gen_model", "")
+            refl = o.get("reflection_model", "")
+            lines.append(f"Generation model: `{gen}` | Reflection model: `{refl}`")
+            lines.append(f"Holdout set: {int(o['n_holdout'])} examples ({int(o['n_holdout_positive'])} positive)")
+        elif not optimized.empty:
+            o = optimized.iloc[0]
+            lines.append(f"- F1: {o['holdout_f1']:.4f} | P: {o['holdout_precision']:.4f} | R: {o['holdout_recall']:.4f}")
+        elif not baseline.empty:
+            b = baseline.iloc[0]
+            lines.append(f"- Baseline F1: {b['holdout_f1']:.4f} | P: {b['holdout_precision']:.4f} | R: {b['holdout_recall']:.4f}")
+
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    summary_path = os.path.join(RESULTS_DIR, SUMMARY_MD)
+    with open(summary_path, "w") as f:
+        f.write("\n".join(lines))
+    logger.info(f"Summary written to {summary_path}.")
+
+
+def _run_dspy(args: argparse.Namespace, splits: dict, dataset_hash: str) -> None:
     """Executes the full DSPy/GEPA pipeline branch.
 
     Args:
-        args:   Parsed CLI arguments.
-        splits: Output of split_pipeline.run().
+        args:         Parsed CLI arguments.
+        splits:       Output of split_pipeline.run().
+        dataset_hash: Hash of the current dataset for staleness detection.
 
     Returns:
         None.
@@ -285,7 +431,7 @@ def _run_dspy(args: argparse.Namespace, splits: dict) -> None:
             )
         logger.info("Step 4: Running fixed model pair (grid search skipped).")
         best_per_label = _run_fixed_dspy_pair(
-            datasets, args.gen_model, args.reflection_model, args.auto
+            datasets, args.gen_model, args.reflection_model, args.auto, dataset_hash
         )
     else:
         n_pairs = len(GENERATION_MODELS) * len(REFLECTION_MODELS)
@@ -294,7 +440,7 @@ def _run_dspy(args: argparse.Namespace, splits: dict) -> None:
             f"{len(REFLECTION_MODELS)} reflection = {n_pairs} pairs x "
             f"{len(LABELS)} labels = {n_pairs * len(LABELS)} trials."
         )
-        best_per_label = grid_search.run(datasets=datasets, auto=args.auto)
+        best_per_label = grid_search.run(datasets=datasets, auto=args.auto, dataset_hash=dataset_hash)
     # Save programs immediately after optimization (enables resume if eval crashes).
     manifest_path = os.path.join(RESULTS_DIR, PROGRAMS_SUBDIR, PROGRAMS_MANIFEST)
     manifest = {}
@@ -302,19 +448,40 @@ def _run_dspy(args: argparse.Namespace, splits: dict) -> None:
         with open(manifest_path) as f:
             manifest = json.load(f)
     for label in LABELS:
-        _save_program(label, best_per_label[label], manifest)
+        _save_program(label, best_per_label[label], manifest, dataset_hash)
 
-    # Evaluate on locked test sets (skip labels already evaluated).
-    logger.info("Step 5: Final evaluation on locked test sets.")
+    # Baseline evaluation (un-optimised programs on holdout set).
+    logger.info("Step 5a: Baseline evaluation on locked holdout sets.")
     for label in LABELS:
-        if _label_eval_exists(label):
-            logger.info(f"[{label}] Evaluation already exists. Skipping.")
+        gen = best_per_label[label].gen_model
+        if _eval_exists(label, "baseline", gen_model=gen, dataset_hash=dataset_hash):
+            logger.info(f"[{label}] Baseline evaluation already exists. Skipping.")
+            continue
+        evaluate.run_baseline_label(
+            label=label,
+            gen_model=gen,
+            datasets=datasets,
+            dataset_hash=dataset_hash,
+        )
+
+    # Evaluate optimised programs on locked holdout sets.
+    logger.info("Step 5b: Optimised evaluation on locked holdout sets.")
+    for label in LABELS:
+        gen = best_per_label[label].gen_model
+        refl = best_per_label[label].reflection_model
+        if _eval_exists(label, "optimized", gen_model=gen, reflection_model=refl, dataset_hash=dataset_hash):
+            logger.info(f"[{label}] Optimised evaluation already exists. Skipping.")
             continue
         evaluate.run_dspy_label(
             label=label,
             result=best_per_label[label],
             datasets=datasets,
+            dataset_hash=dataset_hash,
         )
+
+    # Generate human-readable summary.
+    logger.info("Step 6: Generating summary.")
+    _write_summary_md()
 
 
 def main() -> None:
@@ -331,13 +498,15 @@ def main() -> None:
     logger.info("Pipeline starting.")
     logger.info("Step 1: Loading dataset.")
     df = load_dataset()
+    ds_hash = _dataset_hash(df)
+    logger.info(f"Dataset hash: {ds_hash}.")
     logger.info("Step 2: Splitting dataset.")
     splits = split_pipeline.run(df)
     split_pipeline.save(splits)
-    _run_dspy(args, splits)
+    _run_dspy(args, splits, ds_hash)
     logger.info(
         f"Pipeline complete. Results in '{RESULTS_DIR}/': "
-        f"{GRID_SEARCH_CSV} {FINAL_EVAL_CSV}."
+        f"{GRID_SEARCH_CSV} {EVAL_CSV} {SUMMARY_MD}."
     )
 
 

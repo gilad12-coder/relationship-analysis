@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import dspy
 from loguru import logger
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 from training.config import (
     GEPA_AUTO,
@@ -51,6 +51,10 @@ class OptimizationResult:
     optimized_program: dspy.Module
     val_f1: float
     val_accuracy: float
+    holdout_f1: float = 0.0
+    holdout_precision: float = 0.0
+    holdout_recall: float = 0.0
+    holdout_accuracy: float = 0.0
 
 
 def _supports_reasoning_effort(model_name: str) -> bool:
@@ -146,12 +150,12 @@ def _score_on_valset(
     program: dspy.Module,
     valset: list[dspy.Example],
     label: str,
-) -> tuple[float, float]:
-    """Evaluates a compiled program on the valset and returns F1 and accuracy.
+) -> tuple[float, float, float, float]:
+    """Evaluates a compiled program on a set of examples.
 
     Predictions with values other than POSITIVE_CLASS/'false' are treated as
     negative. F1 is computed for the positive class (config.POSITIVE_CLASS).
-    Inference failures raise to avoid silently corrupting validation metrics.
+    Inference failures raise to avoid silently corrupting metrics.
 
     Args:
         program: A compiled DSPy Module.
@@ -159,7 +163,7 @@ def _score_on_valset(
         label:   Label name, used for contextual error messages.
 
     Returns:
-        Tuple of (f1, accuracy).
+        Tuple of (f1, precision, recall, accuracy).
     """
     y_true, y_pred = [], []
     for idx, example in enumerate(valset):
@@ -168,16 +172,22 @@ def _score_on_valset(
             pred_label = str(pred.label).strip().lower()
         except Exception as exc:
             raise RuntimeError(
-                f"Validation inference failed for label '{label}' at example index {idx}: {exc}"
+                f"Inference failed for label '{label}' at example index {idx}: {exc}"
             ) from exc
 
         y_true.append(1 if example.label == POSITIVE_CLASS else 0)
         y_pred.append(1 if pred_label == POSITIVE_CLASS else 0)
     f1 = f1_score(y_true, y_pred, pos_label=1, zero_division=METRIC_ZERO_DIVISION)
+    precision = precision_score(
+        y_true, y_pred, pos_label=1, zero_division=METRIC_ZERO_DIVISION
+    )
+    recall = recall_score(
+        y_true, y_pred, pos_label=1, zero_division=METRIC_ZERO_DIVISION
+    )
     accuracy = (
         sum(t == p for t, p in zip(y_true, y_pred)) / len(y_true) if y_true else 0.0
     )
-    return f1, accuracy
+    return f1, precision, recall, accuracy
 
 
 def run(
@@ -226,7 +236,7 @@ def run(
         trainset=trainset,
         valset=valset,
     )
-    val_f1, val_accuracy = _score_on_valset(optimized_program, valset, label)
+    val_f1, _val_p, _val_r, val_accuracy = _score_on_valset(optimized_program, valset, label)
     logger.info(
         f"GEPA run complete | label='{label}' | gen='{gen_model}' | "
         f"reflection='{reflection_model}' | val_f1={val_f1:.4f} | val_acc={val_accuracy:.4f}"

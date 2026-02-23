@@ -2,13 +2,12 @@
 Final Evaluation
 ================
 
-Evaluates each label's best GEPA-optimised classifier on its locked test set.
-This module is the only place in the pipeline where the test set is used. It
-must be called exactly once.
+Evaluates each label's classifier on its locked selection holdout set — both
+the baseline (un-optimised) program and the best GEPA-optimised program.
 
 Output:
-  - RESULTS_DIR/FINAL_EVAL_CSV          — one row per label, all metrics.
-  - RESULTS_DIR/PREDICTIONS_SUBDIR/{label}_predictions.csv — per-example predictions.
+  - RESULTS_DIR/EVAL_CSV — one row per (label, stage), all metrics.
+  - RESULTS_DIR/PREDICTIONS_SUBDIR/{stage}_{label}_predictions.csv — per-example predictions.
 """
 
 import os
@@ -16,23 +15,17 @@ import os
 import dspy
 import pandas as pd
 from loguru import logger
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
-)
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 from training.config import (
-    FINAL_EVAL_CSV,
+    EVAL_CSV,
     METRIC_ZERO_DIVISION,
     POSITIVE_CLASS,
     PREDICTIONS_SUBDIR,
     RESULTS_DIR,
 )
 from training.data.dataset_builder import df_to_examples
-from training.optimization.optimize import OptimizationResult, _make_lm
+from training.optimization.optimize import OptimizationResult, _make_lm, _make_program
 
 
 def _compute_metrics(
@@ -64,28 +57,18 @@ def _compute_metrics(
         y_true, y_pred, pos_label=1, zero_division=METRIC_ZERO_DIVISION
     )
     accuracy = sum(t == p for t, p in zip(y_true, y_pred)) / len(y_true)
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-    report = classification_report(
-        y_true,
-        y_pred,
-        labels=[0, 1],
-        target_names=["negative", "positive"],
-        zero_division=METRIC_ZERO_DIVISION,
-    )
     logger.info(
-        f"[{label}] FINAL TEST | "
+        f"[{label}] HOLDOUT | "
         f"F1={f1:.4f} | P={precision:.4f} | R={recall:.4f} | Acc={accuracy:.4f}"
     )
-    logger.info(f"[{label}] Classification report:\n{report}")
-    logger.info(f"[{label}] Confusion matrix:\n{cm}")
     metrics = {
         "label": label,
-        "test_f1": f1,
-        "test_precision": precision,
-        "test_recall": recall,
-        "test_accuracy": accuracy,
-        "n_test": len(y_true),
-        "n_test_positive": sum(y_true),
+        "holdout_f1": f1,
+        "holdout_precision": precision,
+        "holdout_recall": recall,
+        "holdout_accuracy": accuracy,
+        "n_holdout": len(y_true),
+        "n_holdout_positive": sum(y_true),
         **extra,
     }
     preds_df = pd.DataFrame(
@@ -99,64 +82,69 @@ def _compute_metrics(
     return metrics, preds_df
 
 
-def _save_label_results(label: str, metrics: dict, preds_df: pd.DataFrame) -> None:
-    """Saves one label's evaluation results to disk immediately.
+def _save_label_results(
+    label: str, stage: str, metrics: dict, preds_df: pd.DataFrame
+) -> None:
+    """Saves one label's evaluation results to disk.
 
-    Writes the predictions CSV for this label and appends/updates the
-    summary eval CSV so that results are persisted after each label finishes.
+    Writes the predictions CSV and appends/updates the summary eval CSV
+    so that results are persisted after each label finishes.
 
     Args:
         label:    Label name.
+        stage:    'baseline' or 'optimized'.
         metrics:  Metrics dict for this label.
         preds_df: Predictions DataFrame for this label.
-
-    Returns:
-        None.
     """
     os.makedirs(RESULTS_DIR, exist_ok=True)
     preds_dir = os.path.join(RESULTS_DIR, PREDICTIONS_SUBDIR)
     os.makedirs(preds_dir, exist_ok=True)
 
-    path = os.path.join(preds_dir, f"{label}_predictions.csv")
-    preds_df.to_csv(path, index=False)
-    logger.info(f"[{label}] Predictions saved to {path}.")
+    metrics["stage"] = stage
 
-    summary_path = os.path.join(RESULTS_DIR, FINAL_EVAL_CSV)
+    path = os.path.join(preds_dir, f"{stage}_{label}_predictions.csv")
+    preds_df.to_csv(path, index=False)
+    logger.info(f"[{label}] {stage} predictions saved to {path}.")
+
+    summary_path = os.path.join(RESULTS_DIR, EVAL_CSV)
     new_row = pd.DataFrame([metrics])
     if os.path.isfile(summary_path):
         existing = pd.read_csv(summary_path)
-        existing = existing[existing["label"] != label]
+        existing = existing[
+            ~((existing["label"] == label) & (existing["stage"] == stage))
+        ]
         summary_df = pd.concat([existing, new_row], ignore_index=True)
     else:
         summary_df = new_row
     summary_df.to_csv(summary_path, index=False)
-    logger.info(f"[{label}] Evaluation saved to {summary_path}.")
+    logger.info(f"[{label}] {stage} evaluation saved to {summary_path}.")
 
 
 def run_dspy_label(
-    label: str, result: OptimizationResult, datasets: dict
+    label: str, result: OptimizationResult, datasets: dict, dataset_hash: str = ""
 ) -> dict:
-    """Evaluates one label's GEPA-optimised program on its locked test set and saves results.
+    """Evaluates one label's GEPA-optimised program on its locked holdout set and saves results.
 
     Args:
-        label:    Label name.
-        result:   OptimizationResult for this label.
-        datasets: Output of dataset_builder.build(), keyed by label name.
+        label:        Label name.
+        result:       OptimizationResult for this label.
+        datasets:     Output of dataset_builder.build(), keyed by label name.
+        dataset_hash: Hash of the current dataset for staleness detection.
 
     Returns:
         Metrics dict for this label.
     """
-    test_df: pd.DataFrame = datasets[label]["test_df"]
-    testset = df_to_examples(test_df, label)
+    holdout_df: pd.DataFrame = datasets[label]["holdout_df"]
+    holdout_set = df_to_examples(holdout_df, label)
     y_true, y_pred, texts = [], [], []
     dspy.configure(lm=_make_lm(result.gen_model))
-    for idx, example in enumerate(testset):
+    for idx, example in enumerate(holdout_set):
         try:
             prediction = result.optimized_program(text=example.text)
             pred_label = str(prediction.label).strip().lower()
         except Exception as exc:
             raise RuntimeError(
-                f"[{label}] Test inference failed at example index {idx}: {exc}"
+                f"[{label}] Holdout inference failed at example index {idx}: {exc}"
             ) from exc
 
         y_true.append(1 if example.label == POSITIVE_CLASS else 0)
@@ -170,7 +158,45 @@ def run_dspy_label(
         "gen_model": result.gen_model,
         "reflection_model": result.reflection_model,
         "optimized_prompt": optimized_prompt,
+        "dataset_hash": dataset_hash,
     }
     metrics, preds_df = _compute_metrics(label, y_true, y_pred, texts, extra)
-    _save_label_results(label, metrics, preds_df)
+    _save_label_results(label, "optimized", metrics, preds_df)
+    return metrics
+
+
+def run_baseline_label(
+    label: str, gen_model: str, datasets: dict, dataset_hash: str = ""
+) -> dict:
+    """Evaluates one label's un-optimised (baseline) program on its locked holdout set.
+
+    Args:
+        label:        Label name.
+        gen_model:    DSPy model string to use for inference.
+        datasets:     Output of dataset_builder.build(), keyed by label name.
+        dataset_hash: Hash of the current dataset for staleness detection.
+
+    Returns:
+        Metrics dict for this label.
+    """
+    holdout_df: pd.DataFrame = datasets[label]["holdout_df"]
+    holdout_set = df_to_examples(holdout_df, label)
+    y_true, y_pred, texts = [], [], []
+    program = _make_program(label)
+    dspy.configure(lm=_make_lm(gen_model))
+    for idx, example in enumerate(holdout_set):
+        try:
+            prediction = program(text=example.text)
+            pred_label = str(prediction.label).strip().lower()
+        except Exception as exc:
+            raise RuntimeError(
+                f"[{label}] Baseline holdout inference failed at example index {idx}: {exc}"
+            ) from exc
+        y_true.append(1 if example.label == POSITIVE_CLASS else 0)
+        y_pred.append(1 if pred_label == POSITIVE_CLASS else 0)
+        texts.append(example.text)
+    extra = {"gen_model": gen_model, "dataset_hash": dataset_hash}
+    logger.info(f"[{label}] BASELINE (gen={gen_model}):")
+    metrics, preds_df = _compute_metrics(label, y_true, y_pred, texts, extra)
+    _save_label_results(label, "baseline", metrics, preds_df)
     return metrics

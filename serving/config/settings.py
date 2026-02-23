@@ -16,7 +16,11 @@ PROGRAMS_MANIFEST = "manifest.json"
 
 # Optional custom base URL for the LM provider.
 # Read from LM_BASE_URL env var; empty or unset means use the provider's default.
-LM_BASE_URL = os.environ.get("LM_BASE_URL") or None
+LM_BASE_URL = os.environ.get("LM_BASE_URL", None)
+
+# Optional API key for the LM provider.
+# Read from LM_API_KEY env var; empty or unset means use the provider's default.
+LM_API_KEY = os.environ.get("LM_API_KEY", None)
 
 # LM sampling parameters.
 LM_TEMPERATURE = 1.0
